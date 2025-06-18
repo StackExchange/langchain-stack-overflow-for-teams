@@ -23,5 +23,5 @@ uv publish --index testpypi
 Prereq: `UV_PUBLISH_TOKEN` must be set
 
 ```
-uv publish --index testpypi
+uv publish
 ```
