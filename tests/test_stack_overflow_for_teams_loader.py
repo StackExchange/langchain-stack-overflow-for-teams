@@ -1,4 +1,5 @@
 import pytest
+from datetime import datetime, timedelta
 import os
 from typing import Iterator
 
@@ -18,10 +19,31 @@ def fixture_team() -> Iterator[str]:
     yield get_env_var("TEAM", "Team Stack Overflow for Teams API v3")
 
 
-def test_stack_overflow_for_teams_simple_use_case(
+def test_stack_overflow_for_teams_articles(
     access_token: str, team: str, content_type: str = "articles"
 ) -> None:
-    loader = StackOverflowTeamsApiV3Loader(access_token=access_token, team=team, content_type=content_type)
+    loader = StackOverflowTeamsApiV3Loader(
+        access_token=access_token,
+        team=team,
+        content_type=content_type,
+        date_from=(datetime.now() - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00Z"),
+    )
+
+    returned_docs = loader.load()
+
+    assert len(returned_docs) >= 1
+    assert returned_docs[0].metadata != {}
+
+
+def test_stack_overflow_for_teams_questions(
+    access_token: str, team: str, content_type: str = "questions"
+) -> None:
+    loader = StackOverflowTeamsApiV3Loader(
+        access_token=access_token,
+        team=team,
+        content_type=content_type,
+        date_from=(datetime.now() - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00Z"),
+    )
 
     returned_docs = loader.load()
 

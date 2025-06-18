@@ -1,7 +1,10 @@
-from typing import List, Iterable
+from typing import List, Iterable, Dict, Any
+from datetime import datetime
 from langchain_core.documents import Document
 
+import backoff
 import requests
+from requests.exceptions import RequestException
 
 from langchain_community.document_loaders.base import BaseLoader
 
@@ -17,7 +20,11 @@ class StackOverflowTeamsApiV3Loader(BaseLoader):
         date_from: str = "",
         sort: str = "",
         order: str = "",
-        endpoint: str = "api.stackoverflowteams.com"
+        endpoint: str = "api.stackoverflowteams.com",
+        isAnswered: str = "",
+        hasAcceptedAnswer: str = "",
+        max_retries: int = 3,
+        timeout: int = 30,
     ) -> None:
         """
         Initializes the StackOverflowTeamsApiV3Loader with necessary parameters.
@@ -30,94 +37,160 @@ class StackOverflowTeamsApiV3Loader(BaseLoader):
             sort (str, optional): Sort order for results (e.g., "creation", "activity").
             order (str, optional): Order direction ("asc" or "desc").
             endpoint (str, optional): API endpoint to use, default is "api.stackoverflowteams.com".
+            isAnswered (str, options): Whether or not to filter questions to only those that are answered."
+            hasAcceptedAnswer (str, options): Whether or not to filter questions to only those that have an accepted answer.
 
         Raises:
             ValueError: If any required parameter is missing or invalid.
-            ImportError: If the requests library is not installed.
         """
-        try:
-            import requests
-        except ImportError as e:
-            raise ImportError(
-                "Cannot import requests, please install with `pip install requests`."
-            ) from e
-
         if not access_token:
             raise ValueError("access_token must be provided.")
 
-        allowed_content_types = {"questions", "answers", "articles"}
+        allowed_content_types = {"questions", "articles"}
         if content_type not in allowed_content_types:
             raise ValueError(f"content_type must be one of {allowed_content_types}.")
-
-        self.access_token = access_token
-        self.team = team
         self.content_type = content_type
+
+        self.headers = {"Authorization": f"Bearer {access_token}"}
+
+        if date_from:
+            try:
+                datetime.strptime(date_from, "%Y-%m-%dT%H:%M:%SZ")
+            except ValueError as exc:
+                raise ValueError("date_from must be in ISO 8601 format (YYYY-MM-DDThh:mm:ssZ)") from exc
         self.date_from = date_from
+
         self.endpoint = endpoint
+
+        allowed_sorts = {"activity", "creation", "score"}
+        if sort != "" and sort not in allowed_sorts:
+            raise ValueError(f"sort must be one of {allowed_sorts}.")
         self.sort = sort
+
+        allowed_orders = {"asc", "desc"}
+        if order != "" and order not in allowed_orders:
+            raise ValueError(f"order must be one of {allowed_orders}.")
         self.order = order
+
+        self.isAnswered = isAnswered
+        self.hasAcceptedAnswer = hasAcceptedAnswer
+
+        if team:
+            self.fullEndpoint = f"https://{endpoint}/v3/teams/{team}/{self.content_type}"
+        else:
+            self.fullEndpoint = f"https://{self.endpoint}/v3/{self.content_type}"
+
+        self.timeout = timeout
+        self.max_retries = max_retries
 
     def lazy_load(self) -> list[Document]:
         """Load documents from StackOverflow API v3."""
 
         results: List[Document] = []
-        docs = self._doc_loader()
+
+        if self.content_type == "questions":
+            docs = self._question_and_answer_loader()
+        else:
+            docs = self._articles_loader()
         results.extend(docs)
 
         return results
 
-    def _doc_loader(self) -> Iterable[Document]:
-        headers = {"Authorization": f"Bearer {self.access_token}"}
+    def _question_and_answer_loader(self) -> Iterable[Document]:
+        params = {k: v for k, v in {
+            "from": self.date_from,
+            "sort": self.sort,
+            "order": self.order,
+            "isAnswered": self.isAnswered,
+            "hasAcceptedAnswer": self.hasAcceptedAnswer,
+        }.items() if v}
 
-        # build our initial params
-        params = {"page": "1"}
-        # add any optional params
-        if self.date_from:
-            params["from"] = self.date_from
-        if self.sort:
-            params["sort"] = self.sort
-        if self.order:
-            params["order"] = self.order
+        for item in self._get_paginated_results(self.fullEndpoint, params):
+            page_content = ""
 
-        # handle team
-        if self.team:
-            fullEndpoint = f"https://{self.endpoint}/v3/teams/{self.team}/{self.content_type}"
-        else:
-            fullEndpoint = f"https://{self.endpoint}/v3/{self.content_type}"
+            answersBody = ""
+            for answer in self._get_paginated_results(f"{self.fullEndpoint}/{item['id']}/answers", params=params):
+                answersBody += answer["body"] + "\n\n"
 
-        results = True
-        while results:
-            response = requests.get(
-                fullEndpoint,
-                headers=headers,
-                timeout=30,
-                params=params
+            page_content = item["body"] + "\n\n" + answersBody
+
+            metadata = {
+                "id": item["id"],
+                "type": item.get("type", self.content_type),
+                "title": item["title"],
+                "creationDate": item["creationDate"],
+                "lastActivityDate": item["lastActivityDate"],
+                "viewCount": item["viewCount"],
+                "webUrl": item["webUrl"],
+                "isDeleted": item["isDeleted"],
+                "isObsolete": item["isObsolete"],
+                "isClosed": item["isClosed"],
+                "isAnswered": item["isAnswered"],
+                "answerCount": item["answerCount"]
+            }
+
+            yield Document(
+                page_content=page_content,
+                metadata=metadata
             )
 
-            response.raise_for_status()
+    def _articles_loader(self) -> Iterable[Document]:
+        params = {k: v for k, v in {
+            "from": self.date_from,
+            "sort": self.sort,
+            "order": self.order,
+        }.items() if v}
 
-            json_data = response.json()
+        for item in self._get_paginated_results(self.fullEndpoint, params):
+            metadata = {
+                "id": item["id"],
+                "type": item.get("type", self.content_type),
+                "title": item["title"],
+                "creationDate": item["creationDate"],
+                "lastActivityDate": item["lastActivityDate"],
+                "viewCount": item["viewCount"],
+                "webUrl": item["webUrl"],
+                "isDeleted": item["isDeleted"],
+                "isObsolete": item["isObsolete"],
+                "isClosed": item["isClosed"],
+            }
 
-            results = json_data.get("items", [])
+            yield Document(
+                page_content=item["body"],
+                metadata=metadata
+            )
 
-            for item in results:
-                metadata = {
-                    "id": item["id"],
-                    "type": item["type"],
-                    "title": item["title"],
-                    "creationDate": item["creationDate"],
-                    "lastActivityDate": item["lastActivityDate"],
-                    "viewCount": item["viewCount"],
-                    "webUrl": item["webUrl"],
-                    "isDeleted": item["isDeleted"],
-                    "isObsolete": item["isObsolete"],
-                    "isClosed": item["isClosed"],
-                }
+    @backoff.on_exception(
+        backoff.expo,
+        RequestException,
+        max_tries=3
+    )
+    def _make_request(self, url: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Make HTTP request with retry logic and error handling."""
+        response = requests.get(
+            url,
+            headers=self.headers,
+            params=params,
+            timeout=self.timeout,
+            verify=True
+        )
 
-                yield Document(
-                    page_content=item["body"],
-                    metadata=metadata
-                )
+        if response.status_code == 429:
+            raise RequestException("Rate limit exceeded")
 
-            # increment the page number
-            params["page"] = str(int(params["page"]) + 1)
+        response.raise_for_status()
+        return response.json()
+
+    def _get_paginated_results(self, url: str, params: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
+        """Handle pagination for any endpoint."""
+        page = 1
+        items = True
+        while items:
+            params["page"] = str(page)
+            data = self._make_request(url, params)
+            items = data.get("items", [])
+
+            for item in items:
+                yield item
+
+            page += 1
