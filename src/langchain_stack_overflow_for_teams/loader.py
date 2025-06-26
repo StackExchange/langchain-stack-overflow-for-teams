@@ -21,8 +21,8 @@ class StackOverflowTeamsApiV3Loader(BaseLoader):
         sort: str = "",
         order: str = "",
         endpoint: str = "api.stackoverflowteams.com",
-        isAnswered: str = "",
-        hasAcceptedAnswer: str = "",
+        is_answered: str = "",
+        has_accepted_answer: str = "",
         max_retries: int = 3,
         timeout: int = 30,
     ) -> None:
@@ -37,8 +37,10 @@ class StackOverflowTeamsApiV3Loader(BaseLoader):
             sort (str, optional): Sort order for results (e.g., "creation", "activity").
             order (str, optional): Order direction ("asc" or "desc").
             endpoint (str, optional): API endpoint to use, default is "api.stackoverflowteams.com".
-            isAnswered (str, options): Whether or not to filter questions to only those that are answered."
-            hasAcceptedAnswer (str, options): Whether or not to filter questions to only those that have an accepted answer.
+            is_answered (str, options): Whether or not to filter questions to only those that are answered."
+            has_accepted_answer (str, options): Whether or not to filter questions to only those that have an accepted answer.
+            max_retries (int, optional): Maximum number of retries for failed requests.
+            timeout (int, optional): Timeout for requests in seconds.
 
         Raises:
             ValueError: If any required parameter is missing or invalid.
@@ -58,7 +60,7 @@ class StackOverflowTeamsApiV3Loader(BaseLoader):
                 datetime.strptime(date_from, "%Y-%m-%dT%H:%M:%SZ")
             except ValueError as exc:
                 raise ValueError("date_from must be in ISO 8601 format (YYYY-MM-DDThh:mm:ssZ)") from exc
-        self.date_from = date_from
+        self.dateFrom = date_from
 
         self.endpoint = endpoint
 
@@ -72,8 +74,8 @@ class StackOverflowTeamsApiV3Loader(BaseLoader):
             raise ValueError(f"order must be one of {allowed_orders}.")
         self.order = order
 
-        self.isAnswered = isAnswered
-        self.hasAcceptedAnswer = hasAcceptedAnswer
+        self.is_answered = is_answered
+        self.has_accepted_answer = has_accepted_answer
 
         if team:
             self.fullEndpoint = f"https://{endpoint}/v3/teams/{team}/{self.content_type}"
@@ -98,18 +100,18 @@ class StackOverflowTeamsApiV3Loader(BaseLoader):
 
     def _question_and_answer_loader(self) -> Iterable[Document]:
         params = {k: v for k, v in {
-            "from": self.date_from,
+            "from": self.dateFrom,
             "sort": self.sort,
             "order": self.order,
-            "isAnswered": self.isAnswered,
-            "hasAcceptedAnswer": self.hasAcceptedAnswer,
+            "isAnswered": self.is_answered,
+            "hasAcceptedAnswer": self.has_accepted_answer,
         }.items() if v}
 
         for item in self._get_paginated_results(self.fullEndpoint, params):
             page_content = ""
 
             answersBody = ""
-            for answer in self._get_paginated_results(f"{self.fullEndpoint}/{item['id']}/answers", params=params):
+            for answer in self._get_paginated_results(f"{self.fullEndpoint}/{item['id']}/answers", params={}):
                 answersBody += answer["body"] + "\n\n"
 
             page_content = item["body"] + "\n\n" + answersBody
@@ -136,7 +138,7 @@ class StackOverflowTeamsApiV3Loader(BaseLoader):
 
     def _articles_loader(self) -> Iterable[Document]:
         params = {k: v for k, v in {
-            "from": self.date_from,
+            "from": self.dateFrom,
             "sort": self.sort,
             "order": self.order,
         }.items() if v}
